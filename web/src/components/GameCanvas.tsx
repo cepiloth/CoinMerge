@@ -1,9 +1,15 @@
 import React, { useEffect, useRef } from 'react'
 import Matter from 'matter-js'
+import { CURRENCY_STAGES, DEFAULT_COIN_STAGE_INDEX } from '../constants/currency'
 
 const WALL_THICKNESS = 24
-const COIN_RADIUS = 28
 const PREVIEW_Y = 56
+
+/** 동전(화폐) 바디에 부여하는 단계 속성 */
+type CurrencyBody = Matter.Body & { currencyStage: number }
+function isCurrencyBody(body: Matter.Body): body is CurrencyBody {
+  return typeof (body as CurrencyBody).currencyStage === 'number'
+}
 
 /**
  * GameCanvas의 props 인터페이스
@@ -65,10 +71,13 @@ const GameCanvas: React.FC<IGameCanvasProps> = ({
     )
     Matter.World.add(world, [ground, leftWall, rightWall])
 
+    const firstStage = CURRENCY_STAGES[DEFAULT_COIN_STAGE_INDEX]
+    const previewRadius = firstStage.radius
+
     // 2. 상단 대기 동전 (정적, 마우스/터치에 따라 위치 갱신)
-    const previewBody = Matter.Bodies.circle(width / 2, PREVIEW_Y, COIN_RADIUS, {
+    const previewBody = Matter.Bodies.circle(width / 2, PREVIEW_Y, previewRadius, {
       isStatic: true,
-      render: { fillStyle: '#3182F6' },
+      render: { fillStyle: firstStage.color },
     })
     previewBodyRef.current = previewBody
     Matter.World.add(world, previewBody)
@@ -93,7 +102,7 @@ const GameCanvas: React.FC<IGameCanvasProps> = ({
 
     // 좌표를 캔버스 내부로 제한 (대기 동전용)
     const clampX = (x: number) =>
-      Math.max(COIN_RADIUS + 4, Math.min(width - COIN_RADIUS - 4, x))
+      Math.max(previewRadius + 4, Math.min(width - previewRadius - 4, x))
 
     const updatePreviewPosition = (clientX: number, _clientY: number) => {
       const rect = container.getBoundingClientRect()
@@ -118,15 +127,52 @@ const GameCanvas: React.FC<IGameCanvasProps> = ({
       const x = (clientX - rect.left) * scaleX
       const y = (clientY - rect.top) * scaleY
       const dropX = clampX(x)
-      const dropY = Math.min(height - COIN_RADIUS - 8, Math.max(COIN_RADIUS, y))
+      const dropY = Math.min(height - firstStage.radius - 8, Math.max(firstStage.radius, y))
 
-      const coin = Matter.Bodies.circle(dropX, dropY, COIN_RADIUS, {
+      const coin = Matter.Bodies.circle(dropX, dropY, firstStage.radius, {
         restitution: 0.3,
         friction: 0.3,
-        render: { fillStyle: '#3182F6' },
+        render: { fillStyle: firstStage.color },
       })
+      ;(coin as CurrencyBody).currencyStage = DEFAULT_COIN_STAGE_INDEX
       Matter.World.add(world, coin)
     }
+
+    // 4. collisionStart: 같은 단계 두 물체 충돌 시 머지 (제거 → 다음 단계 생성 → 위로 힘)
+    const getMergePopVelocity = () => ({
+      x: (Math.random() - 0.5) * 2,
+      y: -6,
+    })
+    const handleCollisionStart = (event: Matter.IEventCollision<Matter.Engine>) => {
+      const { pairs } = event
+      for (const pair of pairs) {
+        const bodyA = pair.bodyA
+        const bodyB = pair.bodyB
+        if (!isCurrencyBody(bodyA) || !isCurrencyBody(bodyB)) continue
+        const stage = bodyA.currencyStage
+        if (bodyB.currencyStage !== stage) continue
+        if (stage >= CURRENCY_STAGES.length - 1) continue // 골드바는 더 이상 합치지 않음
+
+        // 이미 다른 충돌에서 제거된 경우 스킵
+        if (!world.bodies.includes(bodyA) || !world.bodies.includes(bodyB)) continue
+
+        const nextStage = CURRENCY_STAGES[stage + 1]
+        const midX = (bodyA.position.x + bodyB.position.x) / 2
+        const midY = (bodyA.position.y + bodyB.position.y) / 2
+
+        Matter.World.remove(world, [bodyA, bodyB])
+
+        const merged = Matter.Bodies.circle(midX, midY, nextStage.radius, {
+          restitution: 0.35,
+          friction: 0.3,
+          render: { fillStyle: nextStage.color },
+        })
+        ;(merged as CurrencyBody).currencyStage = stage + 1
+        Matter.Body.setVelocity(merged, getMergePopVelocity())
+        Matter.World.add(world, merged)
+      }
+    }
+    Matter.Events.on(engine, 'collisionStart', handleCollisionStart)
 
     container.addEventListener('mousemove', handlePointerMove)
     container.addEventListener('mousedown', handlePointerDown)
@@ -137,6 +183,7 @@ const GameCanvas: React.FC<IGameCanvasProps> = ({
     }, { passive: false })
 
     return () => {
+      Matter.Events.off(engine, 'collisionStart', handleCollisionStart)
       container.removeEventListener('mousemove', handlePointerMove)
       container.removeEventListener('mousedown', handlePointerDown)
       container.removeEventListener('touchmove', handlePointerMove)
