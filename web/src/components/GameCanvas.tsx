@@ -1,14 +1,30 @@
 import React, { useEffect, useRef } from 'react'
 import Matter from 'matter-js'
-import { CURRENCY_STAGES, DEFAULT_COIN_STAGE_INDEX } from '../constants/currency'
+import { CURRENCY_STAGES } from '../constants/currency'
 
-const WALL_THICKNESS = 24
-const PREVIEW_Y = 56
+const WALL_THICKNESS = 28
+const PREVIEW_Y = 80
 
 /** 동전(화폐) 바디에 부여하는 단계 속성 */
 type CurrencyBody = Matter.Body & { currencyStage: number }
 function isCurrencyBody(body: Matter.Body): body is CurrencyBody {
   return typeof (body as CurrencyBody).currencyStage === 'number'
+}
+
+/** 동전 위에 표시할 짧은 숫자/라벨 */
+function getCoinDisplayLabel(stage: number): string {
+  const labels: Record<number, string> = {
+    0: '10',
+    1: '50',
+    2: '100',
+    3: '500',
+    4: '1K',
+    5: '5K',
+    6: '10K',
+    7: '50K',
+    8: 'G',
+  }
+  return labels[stage] ?? ''
 }
 
 /**
@@ -21,6 +37,14 @@ interface IGameCanvasProps {
   height?: number
   /** 추가 클래스명 */
   className?: string
+  /** 다음에 나올 동전 단계 (0~7) */
+  nextCoinStage: number
+  /** 동전 드롭 후 호출 (다음 동전 갱신용) */
+  onDropComplete: () => void
+  /** 머지 시 점수 추가 */
+  onMergeScore: (points: number) => void
+  /** 골드바 생성 시 게임 종료 */
+  onGameOver: () => void
 }
 
 /**
@@ -32,12 +56,24 @@ const GameCanvas: React.FC<IGameCanvasProps> = ({
   width = 400,
   height = 600,
   className = '',
+  nextCoinStage,
+  onDropComplete,
+  onMergeScore,
+  onGameOver,
 }) => {
   const containerRef = useRef<HTMLDivElement>(null)
   const engineRef = useRef<Matter.Engine | null>(null)
   const renderRef = useRef<Matter.Render | null>(null)
   const runnerRef = useRef<Matter.Runner | null>(null)
   const previewBodyRef = useRef<Matter.Body | null>(null)
+  const nextCoinStageRef = useRef(nextCoinStage)
+  const onDropCompleteRef = useRef(onDropComplete)
+  const onMergeScoreRef = useRef(onMergeScore)
+  const onGameOverRef = useRef(onGameOver)
+  nextCoinStageRef.current = nextCoinStage
+  onDropCompleteRef.current = onDropComplete
+  onMergeScoreRef.current = onMergeScore
+  onGameOverRef.current = onGameOver
 
   useEffect(() => {
     const container = containerRef.current
@@ -46,6 +82,10 @@ const GameCanvas: React.FC<IGameCanvasProps> = ({
     const engine = Matter.Engine.create({ gravity: { x: 0, y: 1 } })
     const { world } = engine
     engineRef.current = engine
+
+    const stageForPreview = Math.min(7, Math.max(0, nextCoinStage))
+    const firstStage = CURRENCY_STAGES[stageForPreview]
+    const previewRadius = firstStage.radius
 
     // 1. 정적 벽: 좌 / 우 / 바닥
     const ground = Matter.Bodies.rectangle(
@@ -70,9 +110,6 @@ const GameCanvas: React.FC<IGameCanvasProps> = ({
       { isStatic: true }
     )
     Matter.World.add(world, [ground, leftWall, rightWall])
-
-    const firstStage = CURRENCY_STAGES[DEFAULT_COIN_STAGE_INDEX]
-    const previewRadius = firstStage.radius
 
     // 2. 상단 대기 동전 (정적, 마우스/터치에 따라 위치 갱신)
     const previewBody = Matter.Bodies.circle(width / 2, PREVIEW_Y, previewRadius, {
@@ -100,9 +137,42 @@ const GameCanvas: React.FC<IGameCanvasProps> = ({
     runnerRef.current = runner
     Matter.Runner.run(runner, engine)
 
-    // 좌표를 캔버스 내부로 제한 (대기 동전용)
+    // 동전 위에 숫자(라벨) 그리기
+    const drawCoinLabels = () => {
+      const ctx = render.context
+      if (!ctx) return
+      const bodies = Matter.Composite.allBodies(world)
+      for (const body of bodies) {
+        let stage: number
+        if (isCurrencyBody(body)) {
+          stage = body.currencyStage
+        } else if (body === previewBody) {
+          stage = nextCoinStageRef.current
+        } else {
+          continue
+        }
+        const label = getCoinDisplayLabel(stage)
+        if (!label) continue
+        const stageData = CURRENCY_STAGES[stage]
+        const radius = stageData?.radius ?? previewRadius
+        const x = body.position.x
+        const y = body.position.y
+        const fontSize = Math.max(10, Math.min(16, Math.floor(radius * 0.55)))
+        ctx.save()
+        ctx.font = `600 ${fontSize}px sans-serif`
+        ctx.textAlign = 'center'
+        ctx.textBaseline = 'middle'
+        ctx.fillStyle = '#191F28'
+        ctx.fillText(label, x, y)
+        ctx.restore()
+      }
+    }
+    Matter.Events.on(render, 'afterRender', drawCoinLabels)
+
+    // 좌표를 캔버스 내부로 제한 (최대 동전 반지름 기준)
+    const maxCoinRadius = Math.max(...CURRENCY_STAGES.map((s) => s.radius))
     const clampX = (x: number) =>
-      Math.max(previewRadius + 4, Math.min(width - previewRadius - 4, x))
+      Math.max(maxCoinRadius + 4, Math.min(width - maxCoinRadius - 4, x))
 
     const updatePreviewPosition = (clientX: number, _clientY: number) => {
       const rect = container.getBoundingClientRect()
@@ -124,18 +194,21 @@ const GameCanvas: React.FC<IGameCanvasProps> = ({
       const clientX = 'touches' in e ? e.touches[0]?.clientX : e.clientX
       const clientY = 'touches' in e ? e.touches[0]?.clientY : e.clientY
       if (clientX == null || clientY == null) return
+      const stageToDrop = Math.min(7, Math.max(0, nextCoinStageRef.current))
+      const stageData = CURRENCY_STAGES[stageToDrop]
       const x = (clientX - rect.left) * scaleX
       const y = (clientY - rect.top) * scaleY
       const dropX = clampX(x)
-      const dropY = Math.min(height - firstStage.radius - 8, Math.max(firstStage.radius, y))
+      const dropY = Math.min(height - stageData.radius - 8, Math.max(stageData.radius, y))
 
-      const coin = Matter.Bodies.circle(dropX, dropY, firstStage.radius, {
+      const coin = Matter.Bodies.circle(dropX, dropY, stageData.radius, {
         restitution: 0.3,
         friction: 0.3,
-        render: { fillStyle: firstStage.color },
+        render: { fillStyle: stageData.color },
       })
-      ;(coin as CurrencyBody).currencyStage = DEFAULT_COIN_STAGE_INDEX
+      ;(coin as CurrencyBody).currencyStage = stageToDrop
       Matter.World.add(world, coin)
+      onDropCompleteRef.current()
     }
 
     // 4. collisionStart: 같은 단계 두 물체 충돌 시 머지 (제거 → 다음 단계 생성 → 위로 힘)
@@ -170,6 +243,11 @@ const GameCanvas: React.FC<IGameCanvasProps> = ({
         ;(merged as CurrencyBody).currencyStage = stage + 1
         Matter.Body.setVelocity(merged, getMergePopVelocity())
         Matter.World.add(world, merged)
+        onMergeScoreRef.current(nextStage.score)
+        if (stage + 1 === 8) onGameOverRef.current()
+        if (typeof navigator !== 'undefined' && navigator.vibrate) {
+          navigator.vibrate(20)
+        }
       }
     }
     Matter.Events.on(engine, 'collisionStart', handleCollisionStart)
@@ -183,6 +261,7 @@ const GameCanvas: React.FC<IGameCanvasProps> = ({
     }, { passive: false })
 
     return () => {
+      Matter.Events.off(render, 'afterRender', drawCoinLabels)
       Matter.Events.off(engine, 'collisionStart', handleCollisionStart)
       container.removeEventListener('mousemove', handlePointerMove)
       container.removeEventListener('mousedown', handlePointerDown)
@@ -200,6 +279,23 @@ const GameCanvas: React.FC<IGameCanvasProps> = ({
       previewBodyRef.current = null
     }
   }, [width, height])
+
+  // nextCoinStage 변경 시 대기 동전(미리보기)만 교체
+  useEffect(() => {
+    const engine = engineRef.current
+    if (!engine) return
+    const world = engine.world
+    const oldPreview = previewBodyRef.current
+    if (oldPreview) Matter.World.remove(world, oldPreview)
+    const stage = Math.min(7, Math.max(0, nextCoinStage))
+    const stageData = CURRENCY_STAGES[stage]
+    const newPreview = Matter.Bodies.circle(width / 2, PREVIEW_Y, stageData.radius, {
+      isStatic: true,
+      render: { fillStyle: stageData.color },
+    })
+    Matter.World.add(world, newPreview)
+    previewBodyRef.current = newPreview
+  }, [nextCoinStage, width])
 
   return (
     <div

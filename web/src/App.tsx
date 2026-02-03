@@ -1,9 +1,14 @@
 import { useState, useCallback, useEffect } from 'react'
 import GameCanvas from './components/GameCanvas'
 import GameUI from './components/GameUI'
-import { CURRENCY_STAGES, DEFAULT_COIN_STAGE_INDEX } from './constants/currency'
+import { CURRENCY_STAGES } from './constants/currency'
 
 const BEST_SCORE_KEY = 'coin-merge-best-score'
+const MAX_NEXT_STAGE = 2 // 10원(0), 50원(1), 100원(2)만 다음 동전으로
+
+function randomNextStage(): number {
+  return Math.floor(Math.random() * (MAX_NEXT_STAGE + 1))
+}
 
 function App() {
   const [score, setScore] = useState(0)
@@ -15,11 +20,25 @@ function App() {
     }
   })
   const [gameOver, setGameOver] = useState(false)
+  const [nextCoinStage, setNextCoinStage] = useState(() => randomNextStage())
 
   const handleRestart = useCallback(() => {
     setScore(0)
     setGameOver(false)
+    setNextCoinStage(randomNextStage())
     // TODO: GameCanvas 리셋 연동
+  }, [])
+
+  const handleDropComplete = useCallback(() => {
+    setNextCoinStage(randomNextStage())
+  }, [])
+
+  const handleMergeScore = useCallback((points: number) => {
+    setScore((prev) => prev + points)
+  }, [])
+
+  const handleGameOver = useCallback(() => {
+    setGameOver(true)
   }, [])
 
   useEffect(() => {
@@ -41,7 +60,7 @@ function App() {
       <GameUI
         score={score}
         bestScore={bestScore}
-        nextCoin={CURRENCY_STAGES[DEFAULT_COIN_STAGE_INDEX]}
+        nextCoin={CURRENCY_STAGES[nextCoinStage]}
         gameOver={gameOver}
         onRestart={handleRestart}
       >
@@ -49,6 +68,10 @@ function App() {
           width={380}
           height={560}
           className="rounded-2xl shadow-lg overflow-hidden"
+          nextCoinStage={nextCoinStage}
+          onDropComplete={handleDropComplete}
+          onMergeScore={handleMergeScore}
+          onGameOver={handleGameOver}
         />
       </GameUI>
     </div>
